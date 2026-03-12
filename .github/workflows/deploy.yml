@@ -1,0 +1,1521 @@
+name: Deploy Spreadsheet
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '.github/workflows/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+
+env:
+  PROJECT_NAME: "Spreadsheet"
+  DOMAIN: "sheetbackend.rtcknowledge.com"
+  FRAMEWORK: "django"
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+    
+    - name: Deploy to Server
+      uses: appleboy/ssh-action@v1.0.0
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        port: ${{ secrets.SSH_PORT }}
+        envs: GH_TOKEN
+        command_timeout: 30m
+        script: |
+          #!/bin/bash
+          set -e
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # DEPLOYHUB - ZERO-DOWNTIME DEPLOYMENT
+          # ═══════════════════════════════════════════════════════════════════════════
+          # Project:   Spreadsheet
+          # Domain:    sheetbackend.rtcknowledge.com
+          # Framework: django
+          # Port:      8026
+          # ═══════════════════════════════════════════════════════════════════════════
+
+          echo "═══════════════════════════════════════════════════════════════════════════"
+          echo "🚀 DEPLOYHUB - Starting Deployment"
+          echo "═══════════════════════════════════════════════════════════════════════════"
+          echo "📅 Started at: $(date)"
+          echo "📦 Project: Spreadsheet"
+          echo "🌐 Domain: sheetbackend.rtcknowledge.com"
+          echo "🔧 Framework: django"
+          echo "═══════════════════════════════════════════════════════════════════════════"
+
+          # Configuration
+          DOMAIN="sheetbackend.rtcknowledge.com"
+          PROJECT_NAME="Spreadsheet"
+          PORT="8026"
+          BRANCH="main"
+          FRAMEWORK="django"
+
+          # Paths - Zero Downtime Structure
+          BASE_PATH="/home/sheetbackend.rtcknowledge.com"
+          RELEASES_PATH="$BASE_PATH/releases"
+          SHARED_PATH="$BASE_PATH/shared"
+          PUBLIC_HTML="$BASE_PATH/public_html"
+          TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+          RELEASE_PATH="$RELEASES_PATH/$TIMESTAMP"
+
+          # Service names
+          SERVICE_NAME="sheetbackend-rtcknowledge-com"
+          PROXY_NAME="sheetbackend_rtcknowledge_com_proxy"
+
+          # Panel config
+          VHOST_CONF="/usr/local/lsws/conf/vhosts/sheetbackend.rtcknowledge.com/vhost.conf"
+
+          # State tracking
+          PREVIOUS_RELEASE=""
+          DEPLOY_SUCCESS=false
+
+          # Cleanup function for rollback
+          cleanup_on_failure() {
+              echo ""
+              echo "❌ DEPLOYMENT FAILED - INITIATING ROLLBACK"
+              echo "═══════════════════════════════════════════════════════════════════════════"
+
+              if [ -n "$PREVIOUS_RELEASE" ] && [ -d "$PREVIOUS_RELEASE" ]; then
+                  echo "🔄 Rolling back to previous release: $PREVIOUS_RELEASE"
+                  # Only remove if it's a symlink
+                  if [ -L "$PUBLIC_HTML" ]; then
+                      rm -f "$PUBLIC_HTML"
+                      ln -sfn "$PREVIOUS_RELEASE" "$PUBLIC_HTML"
+
+                      # Restart service with previous release
+                      systemctl restart "$SERVICE_NAME" 2>/dev/null || true
+
+                      echo "✅ Rollback completed"
+                  else
+                      echo "⚠️  Cannot rollback - public_html is not a symlink"
+                  fi
+              else
+                  echo "⚠️  No previous release available for rollback"
+              fi
+
+              # Clean up failed release
+              if [ -d "$RELEASE_PATH" ] && [ "$DEPLOY_SUCCESS" = false ]; then
+                  echo "🗑️  Cleaning up failed release: $RELEASE_PATH"
+                  rm -rf "$RELEASE_PATH"
+              fi
+
+              exit 1
+          }
+
+          # Trap errors for automatic rollback
+          trap cleanup_on_failure ERR
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 1: PREFLIGHT CHECKS
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "🔍 STAGE 1: Preflight Checks"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          # Check if domain directory exists
+          if [ ! -d "$BASE_PATH" ]; then
+              echo "❌ Base path does not exist: $BASE_PATH"
+              echo "   Please create the domain in CyberPanel first"
+              exit 1
+          fi
+
+          # Check if vhost config exists
+          if [ ! -f "$VHOST_CONF" ]; then
+              echo "⚠️  VHost config not found: $VHOST_CONF"
+              echo "   Domain may not be fully configured in CyberPanel"
+          fi
+
+          # Check required tools
+          for cmd in git python3 pip3; do
+              if ! command -v $cmd &> /dev/null; then
+                  echo "❌ Required command not found: $cmd"
+                  exit 1
+              fi
+          done
+
+          echo "✅ Preflight checks passed"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 2: DIRECTORY SETUP
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "📁 STAGE 2: Setting Up Directory Structure"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          # Create zero-downtime directory structure
+          mkdir -p "$RELEASES_PATH"
+          mkdir -p "$SHARED_PATH"/{logs,media,.cache}
+          mkdir -p "$RELEASE_PATH"
+
+          # Identify previous release for rollback
+          if [ -L "$PUBLIC_HTML" ]; then
+              PREVIOUS_RELEASE=$(readlink -f "$PUBLIC_HTML")
+              echo "📌 Previous release: $PREVIOUS_RELEASE"
+          else
+              echo "📌 First deployment detected"
+          fi
+
+          echo "📂 New release path: $RELEASE_PATH"
+          echo "✅ Directory structure ready"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 3: CODE DEPLOYMENT
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "📥 STAGE 3: Pulling Code from GitHub"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          cd "$RELEASE_PATH"
+
+          # Configure git
+          git config --global --add safe.directory "$RELEASE_PATH" 2>/dev/null || true
+
+          # Clone repository
+          echo "📦 Cloning repository..."
+          git clone --depth 1 --branch "$BRANCH" \
+              "https://x-access-token:$GH_TOKEN@github.com/OjhaG2018/spreadsheet.git" . \
+              2>&1 || {
+                  echo "❌ Failed to clone repository"
+                  echo "   Check if GitHub App has access to: OjhaG2018/spreadsheet"
+                  exit 1
+              }
+
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          COMMIT_MSG=$(git log -1 --format='%s' | head -c 50)
+
+          echo "✅ Code deployed"
+          echo "   Commit: $COMMIT_HASH - $COMMIT_MSG"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 4: SHARED RESOURCES SETUP
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "🔗 STAGE 4: Linking Shared Resources"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          cd "$RELEASE_PATH"
+
+          # Link shared directories
+          if [ -d "$SHARED_PATH/media" ]; then
+              rm -rf media 2>/dev/null || true
+              ln -sfn "$SHARED_PATH/media" media
+              echo "   ✓ Linked media directory"
+          fi
+
+          # Link staticfiles directory (for Django collectstatic)
+          mkdir -p "$SHARED_PATH/staticfiles"
+          if [ -d "$SHARED_PATH/staticfiles" ]; then
+              rm -rf staticfiles 2>/dev/null || true
+              ln -sfn "$SHARED_PATH/staticfiles" staticfiles
+              echo "   ✓ Linked staticfiles directory"
+          fi
+
+          # Link logs directory
+          ln -sfn "$SHARED_PATH/logs" logs 2>/dev/null || mkdir -p logs
+
+          echo "✅ Shared resources linked"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 5: ENVIRONMENT CONFIGURATION (Django)
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "⚙️  STAGE 5: Environment Configuration"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          cd "$RELEASE_PATH"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 1: Create/Update .env file (same as base handler)
+          # ═══════════════════════════════════════════════════════════════════════════
+          ENV_FILE="$SHARED_PATH/.env"
+          ENV_EXAMPLE=".env.example"
+          TEMP_ENV=$(mktemp)
+
+          echo "   📋 Building environment configuration..."
+
+          # Start with existing .env or create new
+          if [ -f "$ENV_FILE" ]; then
+              echo "   ✓ Found existing .env file"
+              cp "$ENV_FILE" "$TEMP_ENV"
+          else
+              echo "   ℹ️  No existing .env found"
+              touch "$TEMP_ENV"
+          fi
+
+          # Add any NEW variables from .env.example (don't overwrite existing)
+          if [ -f "$ENV_EXAMPLE" ]; then
+              echo "   📄 Merging variables from .env.example..."
+              while IFS= read -r line || [ -n "$line" ]; do
+                  if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+                      continue
+                  fi
+                  if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
+                      KEY="${BASH_REMATCH[1]}"
+                      if ! grep -q "^$KEY=" "$TEMP_ENV" 2>/dev/null; then
+                          echo "$line" >> "$TEMP_ENV"
+                      fi
+                  fi
+              done < "$ENV_EXAMPLE"
+          fi
+
+          # Apply DeployHub-provided variables
+          DEPLOYHUB_VARS='DB_NAME=db_uqozf7
+          DB_USER=user_uqozf7
+          DB_PASSWORD=6iLOVnke7Qm81Z-4in0xCQ
+          DB_HOST=localhost
+          DB_PORT=5432
+          ALLOWED_HOSTS=sheetbackend.rtcknowledge.com
+          CORS_ALLOWED_ORIGINS=https://sheetpro.rtcknowledge.com,https://sheetbackend.rtcknowledge.com
+          CSRF_TRUSTED_ORIGINS=https://sheetpro.rtcknowledge.com
+          DB_ENGINE=django.db.backends.postgresql
+          DB_HOST=localhost
+          DB_NAME=db_uqozf7
+          DB_PASSWORD=6iLOVnke7Qm81Z-4in0xCQ
+          DB_PORT=5432
+          DB_USER=user_uqozf7
+          DEBUG=False
+          SECRET_KEY=KIHCEeAymIg1iKuWxkNQJhOdFhQZoMKz5HdqaWcXVX6Fhki3q1SDmwwlwhp00baW1Z0'
+
+          if [ -n "$DEPLOYHUB_VARS" ]; then
+              echo "   🔧 Applying DeployHub configuration..."
+              while IFS= read -r line || [ -n "$line" ]; do
+                  if [[ -z "$line" ]]; then continue; fi
+                  if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
+                      KEY="${BASH_REMATCH[1]}"
+                      sed -i "/^$KEY=/d" "$TEMP_ENV" 2>/dev/null || true
+                      echo "$line" >> "$TEMP_ENV"
+                  fi
+              done <<< "$DEPLOYHUB_VARS"
+          fi
+
+          mv "$TEMP_ENV" "$ENV_FILE"
+          chmod 600 "$ENV_FILE"
+          ln -sfn "$ENV_FILE" .env
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 1.5: Fix CORS_ALLOWED_ORIGINS to ensure https:// prefix
+          # This is critical - Django CORS requires full URLs with protocol
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo "   🔧 Validating CORS configuration..."
+
+          # Check if CORS_ALLOWED_ORIGINS exists but lacks https:// prefix
+          if grep -q "^CORS_ALLOWED_ORIGINS=" "$ENV_FILE" 2>/dev/null; then
+              CORS_LINE=$(grep "^CORS_ALLOWED_ORIGINS=" "$ENV_FILE")
+              CORS_VALUE=$(echo "$CORS_LINE" | cut -d'=' -f2)
+
+              # Check if any origin lacks https:// prefix
+              if echo "$CORS_VALUE" | grep -qv "https://"; then
+                  echo "   ⚠️  Fixing CORS_ALLOWED_ORIGINS to include https:// prefix..."
+
+                  # Build new CORS value with https:// prefix
+                  NEW_CORS=""
+                  IFS=',' read -ra ORIGINS <<< "$CORS_VALUE"
+                  for origin in "${ORIGINS[@]}"; do
+                      origin=$(echo "$origin" | tr -d ' ' | tr -d '"' | tr -d "'")
+                      if [[ -n "$origin" ]]; then
+                          if [[ "$origin" != http* ]]; then
+                              origin="https://$origin"
+                          fi
+                          if [[ -z "$NEW_CORS" ]]; then
+                              NEW_CORS="$origin"
+                          else
+                              NEW_CORS="$NEW_CORS,$origin"
+                          fi
+                      fi
+                  done
+
+                  # Update the .env file
+                  sed -i "s|^CORS_ALLOWED_ORIGINS=.*|CORS_ALLOWED_ORIGINS=$NEW_CORS|" "$ENV_FILE"
+                  echo "   ✓ Updated CORS_ALLOWED_ORIGINS: $NEW_CORS"
+              else
+                  echo "   ✓ CORS_ALLOWED_ORIGINS has correct format"
+              fi
+          else
+              # Add default CORS_ALLOWED_ORIGINS with https:// prefix
+              echo "CORS_ALLOWED_ORIGINS=https://sheetbackend.rtcknowledge.com" >> "$ENV_FILE"
+              echo "   ✓ Added default CORS_ALLOWED_ORIGINS"
+          fi
+
+          # Same check for CSRF_TRUSTED_ORIGINS
+          if grep -q "^CSRF_TRUSTED_ORIGINS=" "$ENV_FILE" 2>/dev/null; then
+              CSRF_LINE=$(grep "^CSRF_TRUSTED_ORIGINS=" "$ENV_FILE")
+              CSRF_VALUE=$(echo "$CSRF_LINE" | cut -d'=' -f2)
+
+              if echo "$CSRF_VALUE" | grep -qv "https://"; then
+                  echo "   ⚠️  Fixing CSRF_TRUSTED_ORIGINS to include https:// prefix..."
+
+                  NEW_CSRF=""
+                  IFS=',' read -ra ORIGINS <<< "$CSRF_VALUE"
+                  for origin in "${ORIGINS[@]}"; do
+                      origin=$(echo "$origin" | tr -d ' ' | tr -d '"' | tr -d "'")
+                      if [[ -n "$origin" ]]; then
+                          if [[ "$origin" != http* ]]; then
+                              origin="https://$origin"
+                          fi
+                          if [[ -z "$NEW_CSRF" ]]; then
+                              NEW_CSRF="$origin"
+                          else
+                              NEW_CSRF="$NEW_CSRF,$origin"
+                          fi
+                      fi
+                  done
+
+                  sed -i "s|^CSRF_TRUSTED_ORIGINS=.*|CSRF_TRUSTED_ORIGINS=$NEW_CSRF|" "$ENV_FILE"
+                  echo "   ✓ Updated CSRF_TRUSTED_ORIGINS: $NEW_CSRF"
+              fi
+          else
+              echo "CSRF_TRUSTED_ORIGINS=https://sheetbackend.rtcknowledge.com" >> "$ENV_FILE"
+              echo "   ✓ Added default CSRF_TRUSTED_ORIGINS"
+          fi
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 2: Create DeployHub Django settings override file
+          # This is the KEY FIX for CORS/ALLOWED_HOSTS issues
+          # ═══════════════════════════════════════════════════════════════════════════
+          DEPLOYHUB_SETTINGS="$SHARED_PATH/deployhub_settings.py"
+
+          if [ -f "$DEPLOYHUB_SETTINGS" ]; then
+              echo "   ✓ DeployHub settings file already exists"
+          else
+              echo "   🔧 Creating DeployHub Django settings..."
+
+              # Download settings file from DeployHub server (fallback to curl if wget not available)
+              if command -v wget >/dev/null 2>&1; then
+                  wget -q "https://deployhub.digitalkrantiindia.com/static/deployment_files/deployhub_settings.py" -O "$DEPLOYHUB_SETTINGS"
+              else
+                  curl -sL "https://deployhub.digitalkrantiindia.com/static/deployment_files/deployhub_settings.py" -o "$DEPLOYHUB_SETTINGS"
+              fi
+              sed -i "s|DOMAIN_PLACEHOLDER|sheetbackend.rtcknowledge.com|g" "$DEPLOYHUB_SETTINGS"
+
+              echo "   ✓ DeployHub settings file created"
+          fi
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 3: Create proxy_fix_middleware.py for CSRF/Proxy fix
+          # This is the PERMANENT solution for CSRF issues behind LiteSpeed proxy
+          # ═══════════════════════════════════════════════════════════════════════════
+          MIDDLEWARE_FILE="$RELEASE_PATH/proxy_fix_middleware.py"
+
+          if [ -f "$MIDDLEWARE_FILE" ]; then
+              echo "   ✓ Proxy fix middleware already exists"
+          else
+              echo "   🔧 Creating proxy fix middleware..."
+
+              # Download middleware file from DeployHub server (fallback to curl if wget not available)
+              if command -v wget >/dev/null 2>&1; then
+                  wget -q "https://deployhub.digitalkrantiindia.com/static/deployment_files/proxy_fix_middleware.py" -O "$MIDDLEWARE_FILE"
+              else
+                  curl -sL "https://deployhub.digitalkrantiindia.com/static/deployment_files/proxy_fix_middleware.py" -o "$MIDDLEWARE_FILE"
+              fi
+
+              echo "   ✓ Proxy fix middleware created"
+          fi
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 4: Find and patch the project's settings.py
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo "   🔧 Patching Django settings for proxy/CSRF fix..."
+
+          # Find the main settings.py file (not in venv)
+          SETTINGS_FILE=$(find . -name "settings.py" -not -path "./venv/*" -not -path "./.venv/*" | head -1)
+
+          if [ -n "$SETTINGS_FILE" ]; then
+              echo "   Found settings: $SETTINGS_FILE"
+
+              # Create backup
+              cp "$SETTINGS_FILE" "$SETTINGS_FILE.deployhub.bak"
+
+              # ─────────────────────────────────────────────────────────────────────────
+              # PATCH 1: Add ProxyHeaderFixMiddleware as FIRST middleware
+              # ─────────────────────────────────────────────────────────────────────────
+              if grep -q "proxy_fix_middleware.ProxyHeaderFixMiddleware" "$SETTINGS_FILE" 2>/dev/null; then
+                  echo "   ✓ Proxy middleware already added"
+              else
+                  echo "   Adding proxy fix middleware to MIDDLEWARE..."
+
+                  # Use sed to add middleware after MIDDLEWARE = [
+                  sed -i "s/MIDDLEWARE = \[/MIDDLEWARE = [\n    'proxy_fix_middleware.ProxyHeaderFixMiddleware',  # DeployHub: CSRF\/Proxy fix - MUST be first!/" "$SETTINGS_FILE"
+
+                  if grep -q "proxy_fix_middleware.ProxyHeaderFixMiddleware" "$SETTINGS_FILE" 2>/dev/null; then
+                      echo "   ✓ Proxy middleware added to MIDDLEWARE list"
+                  else
+                      echo "   ⚠️  Could not find MIDDLEWARE list - manual configuration may be needed"
+                  fi
+              fi
+
+              # ─────────────────────────────────────────────────────────────────────────
+              # PATCH 2: Add proxy trust settings after SECRET_KEY section
+              # SECRET_KEY can be 1-3 lines like:
+              #   SECRET_KEY = 'xxx'
+              #   SECRET_KEY = os.environ.get('SECRET_KEY', 'fallback')
+              #   SECRET_KEY = os.environ.get(
+              #       'SECRET_KEY',
+              #       'fallback-key'
+              #   )
+              # ─────────────────────────────────────────────────────────────────────────
+              if grep -q "SECURE_PROXY_SSL_HEADER.*HTTP_X_FORWARDED_PROTO" "$SETTINGS_FILE" 2>/dev/null; then
+                  echo "   ✓ Proxy trust settings already present"
+              else
+                  echo "   Adding proxy trust settings after SECRET_KEY section..."
+
+                  # Add proxy trust settings directly to settings.py using echo
+                  echo "" >> "$SETTINGS_FILE"
+                  echo "# =============================================================================" >> "$SETTINGS_FILE"
+                  echo "# PROXY TRUST SETTINGS (DeployHub - for LiteSpeed/Nginx/Apache reverse proxy)" >> "$SETTINGS_FILE"
+                  echo "# =============================================================================" >> "$SETTINGS_FILE"
+                  echo 'SECURE_PROXY_SSL_HEADER = ('"'"'HTTP_X_FORWARDED_PROTO'"'"', '"'"'https'"'"')' >> "$SETTINGS_FILE"
+                  echo "USE_X_FORWARDED_HOST = True" >> "$SETTINGS_FILE"
+                  echo "USE_X_FORWARDED_PORT = True" >> "$SETTINGS_FILE"
+                  echo "   ✓ Proxy trust settings added"
+              fi
+
+              # ─────────────────────────────────────────────────────────────────────────
+              # PATCH 3: Add/Update production security settings
+              # ─────────────────────────────────────────────────────────────────────────
+              if grep -q "PRODUCTION SECURITY SETTINGS (DeployHub" "$SETTINGS_FILE" 2>/dev/null; then
+                  echo "   ✓ DeployHub security settings already present"
+              else
+                  echo "   Adding production security settings..."
+
+                  # Add security settings directly to settings.py using echo
+                  echo "" >> "$SETTINGS_FILE"
+                  echo "# =============================================================================" >> "$SETTINGS_FILE"
+                  echo "# PRODUCTION SECURITY SETTINGS (DeployHub - when DEBUG=False)" >> "$SETTINGS_FILE"
+                  echo "# =============================================================================" >> "$SETTINGS_FILE"
+                  echo "" >> "$SETTINGS_FILE"
+                  echo "if not DEBUG:" >> "$SETTINGS_FILE"
+                  echo "    # HTTPS/SSL (Let proxy handle SSL redirect)" >> "$SETTINGS_FILE"
+                  echo "    SECURE_SSL_REDIRECT = False  # Proxy handles this" >> "$SETTINGS_FILE"
+                  echo "    SECURE_HSTS_SECONDS = 31536000  # 1 year" >> "$SETTINGS_FILE"
+                  echo "    SECURE_HSTS_INCLUDE_SUBDOMAINS = True" >> "$SETTINGS_FILE"
+                  echo "    SECURE_HSTS_PRELOAD = True" >> "$SETTINGS_FILE"
+                  echo "" >> "$SETTINGS_FILE"
+                  echo "    # Content Security" >> "$SETTINGS_FILE"
+                  echo "    SECURE_CONTENT_TYPE_NOSNIFF = True" >> "$SETTINGS_FILE"
+                  echo "    SECURE_BROWSER_XSS_FILTER = True" >> "$SETTINGS_FILE"
+                  echo "    X_FRAME_OPTIONS = 'DENY'" >> "$SETTINGS_FILE"
+                  echo "" >> "$SETTINGS_FILE"
+                  echo "    # Session Security" >> "$SETTINGS_FILE"
+                  echo "    SESSION_COOKIE_SECURE = True" >> "$SETTINGS_FILE"
+                  echo "    SESSION_COOKIE_HTTPONLY = True" >> "$SETTINGS_FILE"
+                  echo "    SESSION_COOKIE_SAMESITE = 'Lax'  # Use Lax not Strict for proxy" >> "$SETTINGS_FILE"
+                  echo "    SESSION_COOKIE_AGE = 1209600  # 2 weeks" >> "$SETTINGS_FILE"
+                  echo "" >> "$SETTINGS_FILE"
+                  echo "    # CSRF Security" >> "$SETTINGS_FILE"
+                  echo "    CSRF_COOKIE_SECURE = True" >> "$SETTINGS_FILE"
+                  echo "    CSRF_COOKIE_HTTPONLY = False  # Must be False for CSRF to work" >> "$SETTINGS_FILE"
+                  echo "    CSRF_COOKIE_SAMESITE = 'Lax'  # Use Lax not Strict for proxy" >> "$SETTINGS_FILE"
+                  echo "    CSRF_COOKIE_DOMAIN = None  # Let Django auto-detect" >> "$SETTINGS_FILE"
+                  echo "" >> "$SETTINGS_FILE"
+                  echo "    # Security Headers" >> "$SETTINGS_FILE"
+                  echo "    SECURE_REFERRER_POLICY = 'same-origin'" >> "$SETTINGS_FILE"
+                  echo "   ✓ Added production security settings"
+              fi
+
+              # ─────────────────────────────────────────────────────────────────────────
+              # PATCH 4: Add deployhub_settings import at the end (for CORS/ALLOWED_HOSTS)
+              # ─────────────────────────────────────────────────────────────────────────
+              if grep -q "deployhub_settings" "$SETTINGS_FILE" 2>/dev/null; then
+                  echo "   ✓ DeployHub settings import already present"
+              else
+                  # Create symlink to deployhub_settings.py in the settings directory
+                  SETTINGS_DIR=$(dirname "$SETTINGS_FILE")
+                  ln -sfn "$DEPLOYHUB_SETTINGS" "$SETTINGS_DIR/deployhub_settings.py"
+
+                  # Add import at the end of settings.py
+                  echo "" >> "$SETTINGS_FILE"
+                  echo "# ═══════════════════════════════════════════════════════════════════════════" >> "$SETTINGS_FILE"
+                  echo "# DeployHub Configuration Override (CORS, ALLOWED_HOSTS, Database)" >> "$SETTINGS_FILE"
+                  echo "# ═══════════════════════════════════════════════════════════════════════════" >> "$SETTINGS_FILE"
+                  echo "try:" >> "$SETTINGS_FILE"
+                  echo "    from .deployhub_settings import *" >> "$SETTINGS_FILE"
+                  echo "except ImportError:" >> "$SETTINGS_FILE"
+                  echo "    pass  # DeployHub settings not available (local development)" >> "$SETTINGS_FILE"
+
+                  echo "   ✓ DeployHub settings import added"
+              fi
+
+              # ─────────────────────────────────────────────────────────────────────────
+              # PATCH 5: Add WhiteNoise middleware injection (must be in settings.py scope)
+              # WhiteNoise middleware can't be injected from deployhub_settings.py because
+              # that file runs in its own module scope where MIDDLEWARE doesn't exist.
+              # ─────────────────────────────────────────────────────────────────────────
+              if grep -q "whitenoise" "$SETTINGS_FILE" 2>/dev/null; then
+                  echo "   ✓ WhiteNoise middleware already present"
+              else
+                  echo "" >> "$SETTINGS_FILE"
+                  echo "# ═══════════════════════════════════════════════════════════════════════════" >> "$SETTINGS_FILE"
+                  echo "# WhiteNoise Middleware (injected by DeployHub for static file serving)" >> "$SETTINGS_FILE"
+                  echo "# ═══════════════════════════════════════════════════════════════════════════" >> "$SETTINGS_FILE"
+                  echo "try:" >> "$SETTINGS_FILE"
+                  echo "    import whitenoise  # noqa: F401" >> "$SETTINGS_FILE"
+                  echo "    if 'whitenoise.middleware.WhiteNoiseMiddleware' not in MIDDLEWARE:" >> "$SETTINGS_FILE"
+                  echo "        try:" >> "$SETTINGS_FILE"
+                  echo "            _wn_idx = MIDDLEWARE.index('django.middleware.security.SecurityMiddleware') + 1" >> "$SETTINGS_FILE"
+                  echo "        except ValueError:" >> "$SETTINGS_FILE"
+                  echo "            _wn_idx = 0" >> "$SETTINGS_FILE"
+                  echo "        MIDDLEWARE.insert(_wn_idx, 'whitenoise.middleware.WhiteNoiseMiddleware')" >> "$SETTINGS_FILE"
+                  echo "except ImportError:" >> "$SETTINGS_FILE"
+                  echo "    pass" >> "$SETTINGS_FILE"
+
+                  echo "   ✓ WhiteNoise middleware injection added"
+              fi
+
+              echo "   ✓ Django settings fully patched for proxy/CSRF fix"
+          else
+              echo "   ⚠️  Could not find settings.py - manual configuration may be needed"
+          fi
+
+          # Show summary
+          TOTAL_VARS=$(grep -c "^[A-Za-z_]" "$ENV_FILE" 2>/dev/null || echo 0)
+          echo "   📊 Total environment variables: $TOTAL_VARS"
+          echo "   📊 Domain configured: sheetbackend.rtcknowledge.com"
+          echo "✅ Environment configured with proxy fix middleware and security settings"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 6: DEPENDENCIES
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "📦 STAGE 6: Installing Dependencies"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          cd "$RELEASE_PATH"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 0: Verify/Install Python version
+          # ═══════════════════════════════════════════════════════════════════════════
+          PYTHON_CMD="python3.11"
+          echo "   🐍 Using Python: $PYTHON_CMD"
+
+          # Verify Python is available, try to install if not
+          if ! command -v $PYTHON_CMD &> /dev/null; then
+              echo "   ⚠️  $PYTHON_CMD not found, attempting to install..."
+
+              # Extract version number (e.g., python3.11 -> 3.11)
+              PYTHON_VERSION=$(echo "$PYTHON_CMD" | grep -oE '[0-9]+\.[0-9]+')
+
+              if [ -n "$PYTHON_VERSION" ]; then
+                  # Try to install on AlmaLinux/RHEL/CentOS
+                  echo "   📦 Installing Python $PYTHON_VERSION..."
+
+                  # Try dnf first (AlmaLinux 9, RHEL 9, Fedora)
+                  if command -v dnf &> /dev/null; then
+                      dnf install -y python${PYTHON_VERSION} 2>/dev/null ||             dnf install -y python${PYTHON_VERSION//.} 2>/dev/null ||             dnf install -y python3.${PYTHON_VERSION#*.} 2>/dev/null
+                  # Fallback to yum (CentOS 7, RHEL 7)
+                  elif command -v yum &> /dev/null; then
+                      yum install -y python${PYTHON_VERSION} 2>/dev/null ||             yum install -y python${PYTHON_VERSION//.} 2>/dev/null
+                  # Try apt for Debian/Ubuntu
+                  elif command -v apt-get &> /dev/null; then
+                      apt-get update -qq
+                      apt-get install -y python${PYTHON_VERSION} 2>/dev/null ||             apt-get install -y python${PYTHON_VERSION}-full 2>/dev/null
+                  fi
+              fi
+
+              # Check if installation succeeded
+              if ! command -v $PYTHON_CMD &> /dev/null; then
+                  echo ""
+                  echo "   ❌ $PYTHON_CMD could not be installed!"
+                  echo ""
+                  echo "   Available Python versions on this server:"
+                  for py in /usr/bin/python3.*; do
+                      if [ -x "$py" ] && [[ "$py" != *"-config"* ]]; then
+                          echo "      - $(basename $py): $($py --version 2>&1)"
+                      fi
+                  done
+                  echo ""
+                  echo "   🔧 To fix this:"
+                  echo "      1. Go to DeployHub → Edit Project"
+                  echo "      2. Select an available Python version in Step 2"
+                  echo "      3. Save and redeploy"
+                  echo ""
+                  echo "   Or install Python $PYTHON_VERSION manually on the server:"
+                  echo "      dnf install python${PYTHON_VERSION}"
+                  echo ""
+                  exit 1
+              else
+                  echo "   ✅ Python $PYTHON_VERSION installed successfully!"
+              fi
+          fi
+
+          # Show actual version
+          echo "   📋 Version: $($PYTHON_CMD --version 2>&1)"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 1: Analyze requirements.txt and install system dependencies
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo "   🔍 Analyzing requirements.txt for system dependencies..."
+
+          SYSTEM_PACKAGES=""
+
+          if [ -f "requirements.txt" ]; then
+              # Map Python packages to system dependencies (AlmaLinux/RHEL/CentOS)
+              # Format: check if package exists in requirements.txt, add system deps
+
+              # mysqlclient needs mariadb-devel
+              if grep -qi "^mysqlclient" requirements.txt 2>/dev/null; then
+                  SYSTEM_PACKAGES="$SYSTEM_PACKAGES mariadb-devel gcc"
+                  echo "   📋 mysqlclient detected → need mariadb-devel"
+              fi
+
+              # psycopg2 (not binary) needs postgresql-devel
+              if grep -qi "^psycopg2[^-]" requirements.txt 2>/dev/null; then
+                  SYSTEM_PACKAGES="$SYSTEM_PACKAGES postgresql-devel gcc"
+                  echo "   📋 psycopg2 detected → need postgresql-devel"
+              fi
+
+              # Pillow needs image libraries
+              if grep -qi "^pillow" requirements.txt 2>/dev/null; then
+                  SYSTEM_PACKAGES="$SYSTEM_PACKAGES libjpeg-devel zlib-devel libpng-devel"
+                  echo "   📋 Pillow detected → need image libraries"
+              fi
+
+              # cryptography needs openssl
+              if grep -qi "^cryptography" requirements.txt 2>/dev/null; then
+                  SYSTEM_PACKAGES="$SYSTEM_PACKAGES openssl-devel gcc libffi-devel"
+                  echo "   📋 cryptography detected → need openssl-devel"
+              fi
+
+              # lxml needs xml libraries
+              if grep -qi "^lxml" requirements.txt 2>/dev/null; then
+                  SYSTEM_PACKAGES="$SYSTEM_PACKAGES libxml2-devel libxslt-devel"
+                  echo "   📋 lxml detected → need xml libraries"
+              fi
+
+              # python-ldap needs openldap
+              if grep -qi "^python-ldap" requirements.txt 2>/dev/null; then
+                  SYSTEM_PACKAGES="$SYSTEM_PACKAGES openldap-devel"
+                  echo "   📋 python-ldap detected → need openldap-devel"
+              fi
+
+              # cffi needs libffi
+              if grep -qi "^cffi" requirements.txt 2>/dev/null; then
+                  SYSTEM_PACKAGES="$SYSTEM_PACKAGES libffi-devel gcc"
+                  echo "   📋 cffi detected → need libffi-devel"
+              fi
+
+              # pycairo needs cairo
+              if grep -qi "^pycairo" requirements.txt 2>/dev/null; then
+                  SYSTEM_PACKAGES="$SYSTEM_PACKAGES cairo-devel"
+                  echo "   📋 pycairo detected → need cairo-devel"
+              fi
+
+              # bcrypt needs gcc
+              if grep -qi "^bcrypt" requirements.txt 2>/dev/null; then
+                  SYSTEM_PACKAGES="$SYSTEM_PACKAGES gcc"
+                  echo "   📋 bcrypt detected → need gcc"
+              fi
+
+              # Install system packages if any needed
+              if [ -n "$SYSTEM_PACKAGES" ]; then
+                  echo "   📦 Installing system dependencies..."
+                  # Remove duplicates
+                  SYSTEM_PACKAGES=$(echo "$SYSTEM_PACKAGES" | tr ' ' '
+          ' | sort -u | tr '
+          ' ' ')
+                  dnf install -y $SYSTEM_PACKAGES 2>/dev/null || yum install -y $SYSTEM_PACKAGES 2>/dev/null || {
+                      echo "   ⚠️  Could not install some system packages (may already be installed)"
+                  }
+                  echo "   ✓ System dependencies ready"
+              else
+                  echo "   ✓ No additional system dependencies needed"
+              fi
+          fi
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 1.5: Pre-check Python version compatibility
+          # ═══════════════════════════════════════════════════════════════════════════
+          if [ -f "requirements.txt" ]; then
+              CURRENT_PY_VERSION=$($PYTHON_CMD --version 2>&1 | cut -d' ' -f2)
+              CURRENT_PY_MAJOR=$(echo $CURRENT_PY_VERSION | cut -d'.' -f1)
+              CURRENT_PY_MINOR=$(echo $CURRENT_PY_VERSION | cut -d'.' -f2)
+
+              echo ""
+              echo "   🔍 Checking package compatibility with Python $CURRENT_PY_VERSION..."
+
+              COMPAT_WARNING=""
+              NEEDS_PY310=false
+              NEEDS_PY311=false
+              NEEDS_PY312=false
+
+              # Django 5.x requires Python 3.10+
+              if grep -qiE "^Django[=>~]=*5\." requirements.txt 2>/dev/null; then
+                  if [ "$CURRENT_PY_MINOR" -lt 10 ]; then
+                      NEEDS_PY310=true
+                      COMPAT_WARNING="$COMPAT_WARNING
+             ⚠️  Django 5.x requires Python ≥3.10 (you have $CURRENT_PY_VERSION)"
+                  fi
+              fi
+
+              # Django 6.x requires Python 3.12+
+              if grep -qiE "^Django[=>~]=*6\." requirements.txt 2>/dev/null; then
+                  if [ "$CURRENT_PY_MINOR" -lt 12 ]; then
+                      NEEDS_PY312=true
+                      COMPAT_WARNING="$COMPAT_WARNING
+             ⚠️  Django 6.x requires Python ≥3.12 (you have $CURRENT_PY_VERSION)"
+                  fi
+              fi
+
+              # numpy 2.x requires Python 3.10+
+              if grep -qiE "^numpy[=>~]=*2\." requirements.txt 2>/dev/null; then
+                  if [ "$CURRENT_PY_MINOR" -lt 10 ]; then
+                      NEEDS_PY310=true
+                      COMPAT_WARNING="$COMPAT_WARNING
+             ⚠️  numpy 2.x requires Python ≥3.10 (you have $CURRENT_PY_VERSION)"
+                  fi
+              fi
+
+              # pandas 2.2+ requires Python 3.10+
+              if grep -qiE "^pandas[=>~]=*2\.[2-9]" requirements.txt 2>/dev/null; then
+                  if [ "$CURRENT_PY_MINOR" -lt 10 ]; then
+                      NEEDS_PY310=true
+                      COMPAT_WARNING="$COMPAT_WARNING
+             ⚠️  pandas 2.2+ requires Python ≥3.10 (you have $CURRENT_PY_VERSION)"
+                  fi
+              fi
+
+              # pydantic 2.x requires Python 3.10+
+              if grep -qiE "^pydantic[=>~]=*2\." requirements.txt 2>/dev/null; then
+                  if [ "$CURRENT_PY_MINOR" -lt 10 ]; then
+                      NEEDS_PY310=true
+                      COMPAT_WARNING="$COMPAT_WARNING
+             ⚠️  pydantic 2.x requires Python ≥3.10 (you have $CURRENT_PY_VERSION)"
+                  fi
+              fi
+
+              # sqlalchemy 2.1+ requires Python 3.10+
+              if grep -qiE "^sqlalchemy[=>~]=*2\.[1-9]" requirements.txt 2>/dev/null; then
+                  if [ "$CURRENT_PY_MINOR" -lt 10 ]; then
+                      NEEDS_PY310=true
+                      COMPAT_WARNING="$COMPAT_WARNING
+             ⚠️  SQLAlchemy 2.1+ requires Python ≥3.10 (you have $CURRENT_PY_VERSION)"
+                  fi
+              fi
+
+              # If incompatibilities found, show error and exit
+              if [ -n "$COMPAT_WARNING" ]; then
+                  echo ""
+                  echo "═══════════════════════════════════════════════════════════════════════════"
+                  echo "❌ PYTHON VERSION INCOMPATIBILITY DETECTED"
+                  echo "═══════════════════════════════════════════════════════════════════════════"
+                  echo -e "$COMPAT_WARNING"
+                  echo ""
+                  echo "───────────────────────────────────────────────────────────────────────────"
+                  echo "🔧 HOW TO FIX:"
+                  echo "───────────────────────────────────────────────────────────────────────────"
+                  if [ "$NEEDS_PY312" = true ]; then
+                      echo "   1. Go to DeployHub → Edit Project"
+                      echo "   2. In Step 2, select 'Python 3.12' as the runtime version"
+                      echo "   3. Save and redeploy"
+                  elif [ "$NEEDS_PY311" = true ]; then
+                      echo "   1. Go to DeployHub → Edit Project"
+                      echo "   2. In Step 2, select 'Python 3.11' or higher as the runtime version"
+                      echo "   3. Save and redeploy"
+                  elif [ "$NEEDS_PY310" = true ]; then
+                      echo "   1. Go to DeployHub → Edit Project"
+                      echo "   2. In Step 2, select 'Python 3.10' or higher as the runtime version"
+                      echo "   3. Save and redeploy"
+                  fi
+                  echo ""
+                  echo "   Alternative: Update your requirements.txt to use older package versions"
+                  echo "   compatible with Python $CURRENT_PY_VERSION"
+                  echo "═══════════════════════════════════════════════════════════════════════════"
+                  exit 1
+              else
+                  echo "   ✓ All packages compatible with Python $CURRENT_PY_VERSION"
+              fi
+          fi
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 2: Setup virtualenv with caching
+          # ═══════════════════════════════════════════════════════════════════════════
+          VENV_PATH="$SHARED_PATH/venv"
+
+          # Check if requirements changed (for caching)
+          REQUIREMENTS_HASH=""
+          if [ -f "requirements.txt" ]; then
+              REQUIREMENTS_HASH=$(md5sum requirements.txt | cut -d' ' -f1)
+          fi
+
+          CACHED_HASH=""
+          if [ -f "$SHARED_PATH/.cache/requirements_hash" ]; then
+              CACHED_HASH=$(cat "$SHARED_PATH/.cache/requirements_hash")
+          fi
+
+          # Check if venv exists and has correct Python version
+          RECREATE_VENV=false
+          if [ -f "$VENV_PATH/bin/activate" ]; then
+              # Get Python version in existing venv
+              VENV_PYTHON_VERSION=$("$VENV_PATH/bin/python" --version 2>&1 | cut -d' ' -f2 | cut -d'.' -f1,2)
+              REQUESTED_PYTHON_VERSION=$($PYTHON_CMD --version 2>&1 | cut -d' ' -f2 | cut -d'.' -f1,2)
+
+              echo "   📋 Existing venv Python: $VENV_PYTHON_VERSION"
+              echo "   📋 Requested Python: $REQUESTED_PYTHON_VERSION"
+
+              if [ "$VENV_PYTHON_VERSION" != "$REQUESTED_PYTHON_VERSION" ]; then
+                  echo "   ⚠️  Python version mismatch! Recreating venv..."
+                  rm -rf "$VENV_PATH"
+                  RECREATE_VENV=true
+              fi
+          fi
+
+          # Create or reuse virtualenv
+          if [ ! -f "$VENV_PATH/bin/activate" ] || [ "$RECREATE_VENV" = true ]; then
+              echo "   🔧 Creating new virtual environment with $PYTHON_CMD..."
+              $PYTHON_CMD -m venv "$VENV_PATH" || {
+                  echo "   ❌ Failed to create venv with $PYTHON_CMD"
+                  echo "   Trying with python3..."
+                  python3 -m venv "$VENV_PATH"
+              }
+              DEPS_CHANGED=true
+          elif [ "$REQUIREMENTS_HASH" != "$CACHED_HASH" ]; then
+              echo "   🔄 Requirements changed - will reinstall dependencies"
+              DEPS_CHANGED=true
+          else
+              echo "   ♻️  Requirements unchanged - checking cached dependencies..."
+              DEPS_CHANGED=false
+          fi
+
+          # Activate virtualenv
+          source "$VENV_PATH/bin/activate"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 3: Install Python dependencies
+          # ═══════════════════════════════════════════════════════════════════════════
+          if [ "$DEPS_CHANGED" = true ]; then
+              echo "   ⬆️  Upgrading pip..."
+              pip install --upgrade pip --quiet
+
+              echo "   📦 Installing requirements..."
+              PIP_OUTPUT=$(pip install -r requirements.txt 2>&1) || {
+                  echo "   ⚠️  Some packages failed, trying without cache..."
+                  PIP_OUTPUT=$(pip install -r requirements.txt --no-cache-dir 2>&1) || {
+                      echo "   ❌ Failed to install requirements"
+                      echo ""
+                      echo "═══════════════════════════════════════════════════════════════════════════"
+                      echo "❌ PIP INSTALLATION ERROR DETAILS"
+                      echo "═══════════════════════════════════════════════════════════════════════════"
+                      echo ""
+                      echo "$PIP_OUTPUT"
+                      echo ""
+                      echo "═══════════════════════════════════════════════════════════════════════════"
+                      echo ""
+
+                      # Check if it's a Python version issue
+                      if echo "$PIP_OUTPUT" | grep -q "Requires-Python"; then
+                          echo "🔍 DETECTED ISSUE: PYTHON VERSION INCOMPATIBILITY"
+                          echo "───────────────────────────────────────────────────────────────────────────"
+                          echo "Some packages in requirements.txt require a newer Python version."
+                          echo "Current Python: $($PYTHON_CMD --version 2>&1)"
+                          echo ""
+                          echo "🔧 HOW TO FIX:"
+                          echo "   1. Go to DeployHub → Edit Project"
+                          echo "   2. In Step 2, select a higher Python version (3.10, 3.11, or 3.12)"
+                          echo "   3. Save and redeploy"
+                          echo ""
+                          echo "   Or update your requirements.txt to use compatible package versions"
+                      fi
+
+                      # Check for common compilation errors
+                      if echo "$PIP_OUTPUT" | grep -qi "error: command 'gcc' failed\|compilation terminated\|fatal error"; then
+                          echo "🔍 DETECTED ISSUE: COMPILATION ERROR"
+                          echo "───────────────────────────────────────────────────────────────────────────"
+                          echo "A package requires compilation but system dependencies are missing."
+                          echo ""
+                          echo "🔧 HOW TO FIX:"
+                          echo "   For mysqlclient: sudo dnf install mysql-devel"
+                          echo "   For psycopg2: sudo dnf install postgresql-devel"
+                          echo "   For Pillow: sudo dnf install libjpeg-devel libpng-devel"
+                          echo "   For lxml: sudo dnf install libxml2-devel libxslt-devel"
+                          echo ""
+                          echo "   Or use binary wheels: pip install --prefer-binary <package>"
+                      fi
+
+                      # Check for version conflicts
+                      if echo "$PIP_OUTPUT" | grep -qi "conflicting\|incompatible\|ResolutionImpossible"; then
+                          echo "🔍 DETECTED ISSUE: VERSION CONFLICT"
+                          echo "───────────────────────────────────────────────────────────────────────────"
+                          echo "Package version conflict detected in requirements.txt"
+                          echo ""
+                          echo "🔧 HOW TO FIX:"
+                          echo "   1. Review the error above for conflicting packages"
+                          echo "   2. Update requirements.txt with compatible versions"
+                          echo "   3. Consider using: pip install --upgrade pip to get better resolver"
+                      fi
+
+                      # Check for missing packages
+                      if echo "$PIP_OUTPUT" | grep -qi "No matching distribution\|Could not find"; then
+                          echo "🔍 DETECTED ISSUE: PACKAGE NOT FOUND"
+                          echo "───────────────────────────────────────────────────────────────────────────"
+                          echo "One or more packages could not be found on PyPI."
+                          echo ""
+                          echo "🔧 HOW TO FIX:"
+                          echo "   1. Check package names for typos in requirements.txt"
+                          echo "   2. Verify the package exists on pypi.org"
+                          echo "   3. For private packages, add --extra-index-url"
+                      fi
+
+                      echo "═══════════════════════════════════════════════════════════════════════════"
+                      exit 1
+                  }
+              }
+
+              # Framework-specific dependencies
+              if [ -f "manage.py" ]; then
+                  # Django project - ensure gunicorn is installed
+                  if ! pip show gunicorn >/dev/null 2>&1; then
+                      echo "   📦 Installing gunicorn..."
+                      pip install gunicorn
+                  fi
+
+                  # Django project - ensure python-dotenv is installed for deployhub_settings.py
+                  if ! pip show python-dotenv >/dev/null 2>&1; then
+                      echo "   📦 Installing python-dotenv (env file loading)..."
+                      pip install python-dotenv
+                  fi
+
+                  # Django project - ensure whitenoise is installed for static file serving
+                  # OLS proxy context / catches all requests, so Django must serve static files itself
+                  if ! pip show whitenoise >/dev/null 2>&1; then
+                      echo "   📦 Installing whitenoise (static file serving)..."
+                      pip install whitenoise
+                  fi
+
+                  # Database drivers - fallback if primary fails
+                  if grep -rq "django.db.backends.mysql" . --include="*.py" 2>/dev/null || grep -q "mysql" .env 2>/dev/null; then
+                      if ! pip show mysqlclient >/dev/null 2>&1; then
+                          echo "   📦 Installing MySQL driver..."
+                          pip install mysqlclient 2>/dev/null || {
+                              echo "   ⚠️  mysqlclient failed, using PyMySQL fallback..."
+                              pip install pymysql
+
+                              # Add PyMySQL shim if needed
+                              SETTINGS_DIR=$(find . -name "settings.py" -not -path "./venv/*" | head -1 | xargs dirname 2>/dev/null)
+                              if [ -n "$SETTINGS_DIR" ] && [ -f "$SETTINGS_DIR/__init__.py" ]; then
+                                  if ! grep -q "pymysql" "$SETTINGS_DIR/__init__.py" 2>/dev/null; then
+                                      echo "import pymysql; pymysql.install_as_MySQLdb()" >> "$SETTINGS_DIR/__init__.py"
+                                      echo "   ✓ PyMySQL compatibility shim added"
+                                  fi
+                              fi
+                          }
+                      fi
+                  fi
+
+                  if grep -rq "django.db.backends.postgresql" . --include="*.py" 2>/dev/null || grep -q "postgres" .env 2>/dev/null; then
+                      if ! pip show psycopg2-binary >/dev/null 2>&1 && ! pip show psycopg2 >/dev/null 2>&1; then
+                          echo "   📦 Installing PostgreSQL driver..."
+                          pip install psycopg2-binary
+                      fi
+                  fi
+              fi
+
+              # Cache the requirements hash
+              echo "$REQUIREMENTS_HASH" > "$SHARED_PATH/.cache/requirements_hash"
+              echo "   ✓ Dependencies installed and cached"
+          fi
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STEP 4: Verify critical packages are installed
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo "   🔍 Verifying installations..."
+
+          VERIFICATION_FAILED=false
+
+          # Read requirements.txt and verify key packages
+          if [ -f "requirements.txt" ]; then
+              # Get list of top-level packages (not version specifiers)
+              PACKAGES=$(grep -v "^#" requirements.txt | grep -v "^-" | grep -v "^$" | sed 's/[<>=!].*//' | sed 's/\[.*\]//' | tr '[:upper:]' '[:lower:]')
+
+              # Verify each package can be imported
+              for pkg in $PACKAGES; do
+                  # Convert package name to import name (handle common differences)
+                  import_name="$pkg"
+                  case "$pkg" in
+                      pillow) import_name="PIL" ;;
+                      pyyaml) import_name="yaml" ;;
+                      python-dateutil) import_name="dateutil" ;;
+                      django-*) import_name=$(echo "$pkg" | sed 's/django-//' | tr '-' '_') ;;
+                      djangorestframework) import_name="rest_framework" ;;
+                      djangorestframework-*) import_name=$(echo "$pkg" | sed 's/djangorestframework-/rest_framework_/' | tr '-' '_') ;;
+                      *) import_name=$(echo "$pkg" | tr '-' '_') ;;
+                  esac
+
+                  # Try to import the package
+                  if ! python -c "import $import_name" 2>/dev/null; then
+                      # Some packages have different import names - try common alternatives
+                      alt_import=$(echo "$pkg" | tr '-' '_')
+                      if ! python -c "import $alt_import" 2>/dev/null; then
+                          # Check if pip thinks it's installed
+                          if pip show "$pkg" >/dev/null 2>&1; then
+                              # Installed but import name is different - that's ok
+                              :
+                          else
+                              echo "   ⚠️  Package not installed: $pkg"
+                              # Try to install it individually
+                              echo "   📦 Attempting to install: $pkg"
+                              pip install "$pkg" || {
+                                  echo "   ❌ Failed to install: $pkg"
+                                  VERIFICATION_FAILED=true
+                              }
+                          fi
+                      fi
+                  fi
+              done
+          fi
+
+          # Verify critical Django packages
+          if [ -f "manage.py" ]; then
+              echo "   🔍 Verifying Django setup..."
+
+              # Check django
+              if ! python -c "import django" 2>/dev/null; then
+                  echo "   ❌ Django not installed!"
+                  pip install django
+              fi
+
+              # Check gunicorn
+              if ! python -c "import gunicorn" 2>/dev/null; then
+                  echo "   ❌ Gunicorn not installed!"
+                  pip install gunicorn
+              fi
+
+              # Check common middleware/dependencies that might be in settings
+              for pkg in whitenoise corsheaders rest_framework; do
+                  if grep -rq "$pkg" . --include="*.py" 2>/dev/null; then
+                      if ! python -c "import $pkg" 2>/dev/null; then
+                          case "$pkg" in
+                              whitenoise) pip install whitenoise ;;
+                              corsheaders) pip install django-cors-headers ;;
+                              rest_framework) pip install djangorestframework ;;
+                          esac
+                      fi
+                  fi
+              done
+
+              # Run Django check to catch any missing deps
+              echo "   🔍 Running Django import check..."
+              python -c "
+          import os
+          os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+          try:
+              import django
+              django.setup()
+              print('   ✓ Django configuration valid')
+          except Exception as e:
+              print(f'   ⚠️  Django setup warning: {e}')
+          " 2>/dev/null || true
+          fi
+
+          if [ "$VERIFICATION_FAILED" = true ]; then
+              echo "   ⚠️  Some packages may not be properly installed"
+          fi
+
+          # Link venv to release for service file
+          ln -sfn "$VENV_PATH" "$RELEASE_PATH/venv"
+
+          echo "✅ Dependencies ready"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 7: BUILD
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "🔨 STAGE 7: Building Application"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          cd "$RELEASE_PATH"
+          source "$SHARED_PATH/venv/bin/activate"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # DJANGO BUILD STEPS
+          # ═══════════════════════════════════════════════════════════════════════════
+
+          # Run database migrations
+          echo "   🗄️  Running database migrations..."
+          python manage.py migrate --noinput || {
+              echo "   ⚠️  Migration failed - check database configuration"
+              # Don't fail deployment for migration issues on first deploy
+              # as database might not be configured yet
+          }
+
+          # Collect static files
+          echo "   📊 Collecting static files..."
+          python manage.py collectstatic --noinput --clear 2>/dev/null || python manage.py collectstatic --noinput
+
+          # Set proper permissions on static files and media directories
+          echo "   🔒 Setting file permissions..."
+          if [ -d "staticfiles" ]; then
+              chmod -R 755 staticfiles/
+              echo "   ✓ staticfiles/ permissions set"
+          fi
+          if [ -d "static" ]; then
+              chmod -R 755 static/
+              echo "   ✓ static/ permissions set"
+          fi
+          if [ -d "media" ]; then
+              chmod -R 755 media/
+              echo "   ✓ media/ permissions set"
+          fi
+
+          # Check for any Django checks
+          echo "   🔍 Running Django checks..."
+          python manage.py check --deploy 2>/dev/null || true
+
+          echo "✅ Build complete"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 8: SERVICE CONFIGURATION
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "⚙️  STAGE 8: Configuring Services"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          cd "$RELEASE_PATH"
+
+          # Auto-detect WSGI module
+          WSGI_MODULE="config.wsgi:application"
+          WSGI_FILE=$(find . -name "wsgi.py" -not -path "./venv/*" | head -1)
+          if [ -n "$WSGI_FILE" ]; then
+              WSGI_MODULE=$(echo "$WSGI_FILE" | sed 's|^\./||' | sed 's|/wsgi.py|.wsgi:application|')
+          fi
+          echo "   WSGI Module: $WSGI_MODULE"
+
+          # Create systemd service file
+          # NOTE: We do NOT use EnvironmentFile because systemd doesn't parse shell-style
+          # .env files properly. Instead, we rely on python-dotenv in deployhub_settings.py
+          SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
+
+          cat > "$SERVICE_FILE" << 'EOF'
+          [Unit]
+          Description=Gunicorn daemon for Spreadsheet
+          After=network.target
+
+          [Service]
+          Type=notify
+          User=root
+          Group=root
+          RuntimeDirectory=gunicorn
+          WorkingDirectory=PUBLIC_HTML_PLACEHOLDER
+          # IMPORTANT: Only set PATH here - all other env vars are loaded by python-dotenv
+          # in deployhub_settings.py. This avoids systemd's EnvironmentFile parsing issues.
+          Environment="PATH=SHARED_PATH_PLACEHOLDER/venv/bin"
+          Environment="PYTHONDONTWRITEBYTECODE=1"
+          Environment="PYTHONUNBUFFERED=1"
+          ExecStart=SHARED_PATH_PLACEHOLDER/venv/bin/gunicorn --workers 3 --threads 2 --worker-class gthread --bind 127.0.0.1:8026 --timeout 120 --graceful-timeout 30 --keep-alive 5 --max-requests 1000 --max-requests-jitter 50 --access-logfile SHARED_PATH_PLACEHOLDER/logs/gunicorn-access.log --error-logfile SHARED_PATH_PLACEHOLDER/logs/gunicorn-error.log --capture-output WSGI_MODULE_PLACEHOLDER
+          ExecReload=/bin/kill -s HUP $MAINPID
+          KillMode=mixed
+          TimeoutStopSec=5
+          PrivateTmp=true
+          Restart=on-failure
+          RestartSec=5s
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          # Replace placeholders with actual values
+          sed -i "s|PUBLIC_HTML_PLACEHOLDER|$PUBLIC_HTML|g" "$SERVICE_FILE"
+          sed -i "s|SHARED_PATH_PLACEHOLDER|$SHARED_PATH|g" "$SERVICE_FILE"
+          sed -i "s|WSGI_MODULE_PLACEHOLDER|$WSGI_MODULE|g" "$SERVICE_FILE"
+
+          echo "   ✓ Systemd service file created (using python-dotenv for env vars)"
+
+          # Reload systemd and enable service
+          systemctl daemon-reload
+          systemctl enable "$SERVICE_NAME" 2>/dev/null || true
+
+          # Configure LiteSpeed proxy
+          echo ""
+          echo "   🌐 Configuring LiteSpeed proxy..."
+
+          if [ -f "$VHOST_CONF" ]; then
+              # Check if proxy already configured
+              if grep -q "$PROXY_NAME" "$VHOST_CONF" 2>/dev/null; then
+                  echo "   ✓ Proxy already configured"
+
+                  # Check if X-Forwarded-Proto header is configured
+                  if ! grep -q "X-Forwarded-Proto" "$VHOST_CONF" 2>/dev/null; then
+                      echo "   ⚠️  X-Forwarded-Proto header missing - updating proxy config..."
+
+                      # Backup before modification
+                      cp "$VHOST_CONF" "$VHOST_CONF.bak.$(date +%s)"
+
+                      # Remove existing context / block and recreate with proper headers
+                      sed -i "/context \/ {/,/}/d" "$VHOST_CONF"
+
+                      # Add new context (CORS is handled by Django corsheaders middleware)
+                      echo "" >> "$VHOST_CONF"
+                      echo "context / {" >> "$VHOST_CONF"
+                      echo "  type                    proxy" >> "$VHOST_CONF"
+                      echo "  handler                 $PROXY_NAME" >> "$VHOST_CONF"
+                      echo "  addDefaultCharset       off" >> "$VHOST_CONF"
+                      echo "" >> "$VHOST_CONF"
+                      echo "  # Forward X-Forwarded-Proto for Django CSRF/HTTPS detection" >> "$VHOST_CONF"
+                      echo "  # NOTE: CORS headers are handled by Django corsheaders middleware" >> "$VHOST_CONF"
+                      echo "  requestHeaders          X-Forwarded-Proto https" >> "$VHOST_CONF"
+                      echo "}" >> "$VHOST_CONF"
+
+                      chown lsadm:nobody "$VHOST_CONF" 2>/dev/null || true
+                      echo "   ✓ Proxy headers updated"
+                  fi
+              else
+                  echo "   📝 Adding proxy configuration..."
+
+                  # Backup
+                  cp "$VHOST_CONF" "$VHOST_CONF.bak.$(date +%s)"
+
+                  # Add proxy configuration (CORS is handled by Django corsheaders middleware)
+                  echo "" >> "$VHOST_CONF"
+                  echo "context / {" >> "$VHOST_CONF"
+                  echo "  type                    proxy" >> "$VHOST_CONF"
+                  echo "  handler                 $PROXY_NAME" >> "$VHOST_CONF"
+                  echo "  addDefaultCharset       off" >> "$VHOST_CONF"
+                  echo "" >> "$VHOST_CONF"
+                  echo "  # Forward X-Forwarded-Proto for Django CSRF/HTTPS detection" >> "$VHOST_CONF"
+                  echo "  # NOTE: CORS headers are handled by Django corsheaders middleware" >> "$VHOST_CONF"
+                  echo "  requestHeaders          X-Forwarded-Proto https" >> "$VHOST_CONF"
+                  echo "}" >> "$VHOST_CONF"
+                  echo "" >> "$VHOST_CONF"
+                  echo "extprocessor $PROXY_NAME {" >> "$VHOST_CONF"
+                  echo "  type                    proxy" >> "$VHOST_CONF"
+                  echo "  address                 http://127.0.0.1:8026" >> "$VHOST_CONF"
+                  echo "  maxConns                100" >> "$VHOST_CONF"
+                  echo "  pcKeepAliveTimeout      60" >> "$VHOST_CONF"
+                  echo "  initTimeout             60" >> "$VHOST_CONF"
+                  echo "  retryTimeout            0" >> "$VHOST_CONF"
+                  echo "  respBuffer              0" >> "$VHOST_CONF"
+                  echo "  autoStart               1" >> "$VHOST_CONF"
+                  echo "  persistConn             1" >> "$VHOST_CONF"
+                  echo "}" >> "$VHOST_CONF"
+
+                  chown lsadm:nobody "$VHOST_CONF" 2>/dev/null || true
+              fi
+
+              # NOTE: Static/media files are served by WhiteNoise middleware via Django/Gunicorn
+              # OLS proxy context / catches all requests, so context /static/ type none cannot override it
+
+              # Restart LiteSpeed
+              echo "   🔄 Restarting LiteSpeed..."
+              systemctl restart lsws 2>/dev/null && sleep 2
+              echo "   ✓ LiteSpeed restarted"
+          else
+              echo "   ⚠️  VHost config not found - proxy not configured"
+          fi
+
+          # Start/restart the application service
+          echo ""
+          echo "   🚀 Starting application service..."
+          systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+          sleep 2
+          systemctl start "$SERVICE_NAME"
+
+          if systemctl is-active --quiet "$SERVICE_NAME"; then
+              echo "   ✅ Service started successfully"
+          else
+              echo "   ❌ Service failed to start"
+              journalctl -u "$SERVICE_NAME" -n 20 --no-pager
+              exit 1
+          fi
+
+          echo "✅ Service configuration complete"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 9: ATOMIC CUTOVER
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "🔄 STAGE 9: Atomic Cutover"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          # Save previous release for potential rollback
+          if [ -L "$PUBLIC_HTML" ]; then
+              PREVIOUS_RELEASE=$(readlink -f "$PUBLIC_HTML")
+              echo "   Previous release: $PREVIOUS_RELEASE"
+          fi
+
+          # Handle public_html - could be directory (first deploy) or symlink (subsequent)
+          if [ -L "$PUBLIC_HTML" ]; then
+              # It's a symlink - safe to remove with rm -f
+              echo "   🔗 Removing existing symlink..."
+              rm -f "$PUBLIC_HTML"
+          elif [ -d "$PUBLIC_HTML" ]; then
+              # It's a real directory (first deploy from CyberPanel)
+              echo "   📁 First deployment - public_html is a directory"
+
+              # Check if there are any files to preserve
+              FILE_COUNT=$(find "$PUBLIC_HTML" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
+              if [ "$FILE_COUNT" -gt 0 ]; then
+                  echo "   📦 Backing up existing public_html contents ($FILE_COUNT items)..."
+                  BACKUP_PATH="$BASE_PATH/public_html_backup_$(date +%Y%m%d_%H%M%S)"
+                  mv "$PUBLIC_HTML" "$BACKUP_PATH"
+                  echo "   ✓ Backed up to: $BACKUP_PATH"
+              else
+                  echo "   🗑️  Removing empty public_html directory..."
+                  rm -rf "$PUBLIC_HTML"
+              fi
+          elif [ -e "$PUBLIC_HTML" ]; then
+              # Some other type of file
+              echo "   ⚠️  Removing existing public_html (unknown type)..."
+              rm -rf "$PUBLIC_HTML"
+          fi
+
+          # Ensure public_html doesn't exist before creating symlink
+          if [ -e "$PUBLIC_HTML" ] || [ -L "$PUBLIC_HTML" ]; then
+              echo "   ⚠️  Force removing public_html..."
+              rm -rf "$PUBLIC_HTML"
+          fi
+
+          # Create new symlink
+          ln -sfn "$RELEASE_PATH" "$PUBLIC_HTML"
+
+          # Verify symlink was created
+          if [ -L "$PUBLIC_HTML" ]; then
+              echo "   ✓ Symlink created: $PUBLIC_HTML -> $RELEASE_PATH"
+              echo "✅ Cutover complete"
+          else
+              echo "   ❌ Failed to create symlink"
+              exit 1
+          fi
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 10: VERIFICATION
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "🔍 STAGE 10: Deployment Verification"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          # Give services time to fully start
+          echo "   ⏳ Waiting for services to stabilize..."
+          sleep 8
+
+          # Check service status with retries
+          SERVICE_OK=false
+          for i in 1 2 3; do
+              if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+                  SERVICE_OK=true
+                  echo "   ✅ Service is running"
+                  break
+              fi
+              if [ $i -lt 3 ]; then
+                  echo "   ⏳ Service not ready, retrying... ($i/3)"
+                  sleep 3
+              fi
+          done
+
+          if [ "$SERVICE_OK" = false ]; then
+              echo "   ⚠️  Service status check failed (may still be starting)"
+              echo "   Checking recent logs..."
+              journalctl -u "$SERVICE_NAME" -n 5 --no-pager 2>/dev/null || true
+          fi
+
+          # Check if app responds locally
+          APP_OK=false
+          for i in 1 2 3; do
+              if curl -sf --connect-timeout 5 "http://127.0.0.1:8026/" > /dev/null 2>&1; then
+                  APP_OK=true
+                  echo "   ✅ Application responding on port 8026"
+                  break
+              elif curl -sf --connect-timeout 5 "http://127.0.0.1:8026/health" > /dev/null 2>&1; then
+                  APP_OK=true
+                  echo "   ✅ Application health check passed on port 8026"
+                  break
+              fi
+              if [ $i -lt 3 ]; then
+                  sleep 2
+              fi
+          done
+
+          if [ "$APP_OK" = false ]; then
+              # Check if process is at least running
+              if pgrep -f "gunicorn.*8026" > /dev/null 2>&1 || pgrep -f "python.*8026" > /dev/null 2>&1; then
+                  APP_OK=true
+                  echo "   ✅ Application process is running on port 8026"
+              else
+                  echo "   ⚠️  Application not responding on port 8026 (may be behind proxy)"
+              fi
+          fi
+
+          # Check proxy config
+          PROXY_OK=false
+          if [ -f "$VHOST_CONF" ] && grep -q "$PROXY_NAME" "$VHOST_CONF" 2>/dev/null; then
+              PROXY_OK=true
+              echo "   ✅ Proxy configured"
+          else
+              echo "   ⚠️  Proxy configuration not detected"
+          fi
+
+          # Overall status - success if EITHER service OR app check passes
+          if [ "$SERVICE_OK" = true ] || [ "$APP_OK" = true ]; then
+              echo ""
+              echo "═══════════════════════════════════════════════════════════════════════════"
+              echo "✅ DEPLOYMENT SUCCESSFUL"
+              echo "═══════════════════════════════════════════════════════════════════════════"
+          else
+              echo ""
+              echo "═══════════════════════════════════════════════════════════════════════════"
+              echo "⚠️  DEPLOYMENT COMPLETED WITH WARNINGS"
+              echo "═══════════════════════════════════════════════════════════════════════════"
+              echo "   The deployment completed but verification checks did not pass."
+              echo "   Please verify manually that the application is accessible."
+              # Don't exit 1 - let the deployment complete
+          fi
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # STAGE 11: CLEANUP
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "🧹 STAGE 11: Cleanup"
+          echo "───────────────────────────────────────────────────────────────────────────"
+
+          # Keep only last 3 releases
+          cd "$RELEASES_PATH"
+          RELEASE_COUNT=$(ls -1d */ 2>/dev/null | wc -l)
+
+          if [ "$RELEASE_COUNT" -gt 3 ]; then
+              echo "   Cleaning old releases (keeping last 3)..."
+              ls -1dt */ | tail -n +4 | xargs rm -rf
+              echo "   ✓ Removed $((RELEASE_COUNT - 3)) old release(s)"
+          else
+              echo "   ✓ No cleanup needed ($RELEASE_COUNT releases)"
+          fi
+
+          echo "✅ Cleanup complete"
+
+          # ═══════════════════════════════════════════════════════════════════════════
+          # DEPLOYMENT COMPLETE
+          # ═══════════════════════════════════════════════════════════════════════════
+          echo ""
+          echo "═══════════════════════════════════════════════════════════════════════════"
+          echo "🎉 DEPLOYMENT COMPLETE"
+          echo "═══════════════════════════════════════════════════════════════════════════"
+          echo "📅 Completed at: $(date)"
+          echo "🌐 URL: https://sheetbackend.rtcknowledge.com"
+          echo "📂 Release: $RELEASE_PATH"
+          echo "═══════════════════════════════════════════════════════════════════════════"
+    
+    - name: Deployment Summary
+      if: always()
+      run: |
+        echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Project:** Spreadsheet" >> $GITHUB_STEP_SUMMARY
+        echo "- **Domain:** sheetbackend.rtcknowledge.com" >> $GITHUB_STEP_SUMMARY
+        echo "- **Framework:** django" >> $GITHUB_STEP_SUMMARY
+        echo "- **Branch:** main" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,13 @@
+{% extends "admin/index.html" %}
+
+{% block content %}
+<div style="margin-bottom: 20px; padding: 15px; background: #e7f3ff; border: 1px solid #b3d9ff; border-radius: 5px;">
+    <h3 style="margin-top: 0;">📊 SmartSheet Pro Dashboard</h3>
+    <p>View comprehensive statistics and recent activity across all SmartSheet Pro modules.</p>
+    <a href="/smartsheet-admin/dashboard/" class="button" style="background: #417690; color: white; padding: 8px 16px; text-decoration: none; border-radius: 4px;">
+        View Dashboard
+    </a>
+</div>
+
+{{ block.super }}
+{% endblock %}

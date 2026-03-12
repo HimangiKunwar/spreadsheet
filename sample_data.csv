@@ -1,0 +1,11 @@
+order_id,customer_email,product_name,quantity,unit_price,total_amount,order_date,status
+1001,john.doe@email.com,Laptop Pro,1,1299.99,1299.99,2024-01-15,completed
+1002,jane.smith@email.com,Wireless Mouse,2,29.99,59.98,2024-01-16,pending
+1003,bob.wilson@email.com,Keyboard Mechanical,1,149.99,149.99,2024-01-16,completed
+1004,alice.brown@email.com,Monitor 27inch,1,399.99,399.99,2024-01-17,shipped
+1005,charlie.davis@email.com,USB Cable,3,12.99,38.97,2024-01-17,pending
+1006,diana.miller@email.com,Laptop Pro,1,1299.99,1299.99,2024-01-18,completed
+1007,frank.garcia@email.com,Wireless Mouse,1,29.99,29.99,2024-01-18,cancelled
+1008,grace.martinez@email.com,Tablet 10inch,2,299.99,599.98,2024-01-19,completed
+1009,henry.lopez@email.com,Phone Case,1,19.99,19.99,2024-01-19,shipped
+1010,ivy.anderson@email.com,Headphones,1,199.99,199.99,2024-01-20,pending
