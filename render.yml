@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: smartsheet-pro-backend
+    env: python
+    buildCommand: >
+      pip install -r requirements.txt &&
+      python manage.py collectstatic --no-input &&
+      python manage.py migrate
+    startCommand: "gunicorn config.wsgi:application"
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: smartsheet-db
+          property: connectionString
+      - key: ALLOWED_HOSTS
+        value: "smartsheet-pro-backend.onrender.com"
+      - key: CORS_ALLOWED_ORIGINS
+        value: "https://your-app.vercel.app"
+      - key: REDIS_URL
+        sync: false   # You'll paste Upstash URL manually
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: USE_CELERY
+        value: "False"  # Keep False on free tier (no worker dyno)
+```
+
+> ✅ Notice `config.wsgi` — matches your `WSGI_APPLICATION = 'config.wsgi.application'`
+
+---
+
+## 🔴 PART 3 — Set Up Free Redis (Upstash)
+
+1. Go to [upstash.com](https://upstash.com) → Sign up free
+2. Click **Create Database** → Choose region closest to you (e.g. `ap-south-1` for India)
+3. Copy the **Redis URL** — looks like:
+```
+   rediss://default:xxxx@your-db.upstash.io:6380

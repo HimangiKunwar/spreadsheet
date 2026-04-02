@@ -1,5 +1,6 @@
 import environ
 import os
+import dj_database_url  # ✅ Added for Render DATABASE_URL support
 from pathlib import Path
 from datetime import timedelta
 
@@ -44,6 +45,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # ✅ Added for static files on Render
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -57,7 +59,7 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates'],  # Add templates directory
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -72,6 +74,10 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'config.wsgi.application'
 
+# =============================================================================
+# DATABASE CONFIGURATION
+# =============================================================================
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -82,6 +88,15 @@ DATABASES = {
         'PORT': env('DB_PORT', default='5432'),
     }
 }
+
+# ✅ Override with DATABASE_URL if provided (Render sets this automatically)
+_DATABASE_URL = env('DATABASE_URL', default=None)
+if _DATABASE_URL:
+    DATABASES['default'] = dj_database_url.config(
+        default=_DATABASE_URL,
+        conn_max_age=600,
+        ssl_require=True,  # Render PostgreSQL requires SSL
+    )
 
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
@@ -95,13 +110,24 @@ TIME_ZONE = 'UTC'
 USE_I18N = True
 USE_TZ = True
 
+# =============================================================================
+# STATIC & MEDIA FILES
+# =============================================================================
+
 STATIC_URL = '/static/'
 STATIC_ROOT = env('STATIC_ROOT', default=str(BASE_DIR / 'staticfiles'))
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# ✅ WhiteNoise compressed static files storage for production
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 AUTH_USER_MODEL = 'authentication.User'
+
+# =============================================================================
+# REST FRAMEWORK & JWT
+# =============================================================================
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
@@ -121,10 +147,18 @@ SIMPLE_JWT = {
     'BLACKLIST_AFTER_ROTATION': True,
 }
 
+# =============================================================================
+# CORS
+# =============================================================================
+
 CORS_ALLOWED_ORIGINS = env.list('CORS_ALLOWED_ORIGINS', default=[
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ])
+
+# =============================================================================
+# FILE UPLOAD SETTINGS
+# =============================================================================
 
 MAX_UPLOAD_SIZE = env.int('MAX_UPLOAD_SIZE_MB', default=50) * 1024 * 1024  # Convert MB to bytes
 ALLOWED_FILE_EXTENSIONS = ['.csv', '.xlsx', '.xls', '.tsv', '.json']
@@ -155,7 +189,6 @@ CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
 # ASYNC PROCESSING THRESHOLDS
 # =============================================================================
 
-# Set to False to disable Celery and run tasks synchronously (for development)
 USE_CELERY = env.bool('USE_CELERY', default=False)
 
 ASYNC_FILE_SIZE_THRESHOLD = env.int('ASYNC_FILE_SIZE_THRESHOLD', default=5242880)   # 5MB
@@ -163,7 +196,7 @@ ASYNC_ROW_COUNT_THRESHOLD = env.int('ASYNC_ROW_COUNT_THRESHOLD', default=10000) 
 CHUNK_SIZE_DEFAULT = env.int('CHUNK_SIZE_DEFAULT', default=1000)                   # Rows per chunk
 
 # =============================================================================
-# CACHES (for progress tracking)
+# CACHES (Redis — for progress tracking)
 # =============================================================================
 
 CACHES = {
